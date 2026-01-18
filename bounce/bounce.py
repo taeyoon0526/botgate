@@ -47,6 +47,16 @@ def _format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def _format_minutes(seconds: int) -> str:
+    minutes = max(1, int(round(seconds / 60)))
+    return str(minutes)
+
+
+def _format_days(seconds: int) -> str:
+    days = max(1, int(round(seconds / 86400)))
+    return str(days)
+
+
 class LogActionButton(discord.ui.Button):
     def __init__(
         self,
@@ -460,6 +470,35 @@ class Bounce(commands.Cog):
     async def on_member_join(self, member: discord.Member) -> None:
         if not member.guild:
             return
+        try:
+            window_seconds = await self.config.guild(member.guild).window_seconds()
+            ban_seconds = await self.config.guild(member.guild).ban_duration_seconds()
+            embed = discord.Embed(
+                title="환영합니다!",
+                description=(
+                    f"**{member.guild.name}**에 오신 것을 환영합니다.\n"
+                    "서버 이용 전에 간단한 안내 사항을 꼭 확인해 주세요."
+                ),
+                color=discord.Color.blurple(),
+            )
+            embed.add_field(
+                name="⏰️ 들낙(단시간 입장/퇴장) 안내",
+                value=(
+                    f"입장 후 **{_format_minutes(window_seconds)}분** 미만으로 퇴장하실 경우,\n"
+                    f"시스템에 의해 들낙으로 처리되어 **자동 임시 밴 {_format_days(ban_seconds)}일**이 적용됩니다.\n\n"
+                    "이는 서버 질서 유지를 위한 자동 시스템이며\n"
+                    "실수나 테스트 입장도 동일하게 적용되니 참고 부탁드립니다."
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="감사합니다",
+                value="쾌적하고 안전한 서버 운영을 위해 협조해 주셔서 감사합니다! 🙏\n즐거운 이용 되세요!",
+                inline=False,
+            )
+            await member.send(embed=embed)
+        except (Forbidden, HTTPException):
+            pass
         include_bots = await self.config.guild(member.guild).include_bots()
         if self._should_ignore_member(member, include_bots):
             return
@@ -510,6 +549,7 @@ class Bounce(commands.Cog):
                     await log_channel.send(f"DM 실패: {member} ({member.id}) - {dm_result}")
                 except (Forbidden, HTTPException):
                     pass
+        await asyncio.sleep(5)
         if is_permban:
             try:
                 await guild.ban(
