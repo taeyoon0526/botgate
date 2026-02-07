@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 
 import discord
 from redbot.core import Config, commands
@@ -36,13 +36,116 @@ class ApproveButton(discord.ui.Button):
         await interaction.response.send_message("승인 완료. 허용 목록에 추가했습니다.", ephemeral=True)
 
 
-class ApproveView(discord.ui.View):
-    def __init__(self, cog: "BotGate", guild_id: int, bot_id: int):
+class InviteLinkButton(discord.ui.Button):
+    def __init__(self, bot_id: int, url: str):
+        super().__init__(
+            label="봇 초대 링크",
+            style=discord.ButtonStyle.link,
+            url=url,
+        )
+        self.bot_id = bot_id
+
+def _add_layout_text(
+    view: discord.ui.LayoutView,
+    title: Optional[str],
+    lines: Optional[List[str]],
+    footer: Optional[str],
+    *,
+    accent_color: Optional[int] = None,
+    use_container: bool = False,
+) -> None:
+    container: Optional[discord.ui.Container] = None
+    if use_container:
+        container = discord.ui.Container(
+            accent_color=accent_color or int(discord.Color.blurple())
+        )
+        view.add_item(container)
+    if title:
+        title_display = discord.ui.TextDisplay(f"## {title}")
+        if container:
+            container.add_item(title_display)
+            container.add_item(
+                discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small)
+            )
+        else:
+            view.add_item(title_display)
+            view.add_item(
+                discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small)
+            )
+    if lines:
+        for line in lines:
+            if container:
+                container.add_item(discord.ui.TextDisplay(line))
+            else:
+                view.add_item(discord.ui.TextDisplay(line))
+    if footer:
+        separator = discord.ui.Separator(
+            visible=False, spacing=discord.SeparatorSpacing.small
+        )
+        footer_display = discord.ui.TextDisplay(f"*{footer}*")
+        if container:
+            container.add_item(separator)
+            container.add_item(footer_display)
+        else:
+            view.add_item(separator)
+            view.add_item(footer_display)
+
+
+class BotGateLayoutView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        *,
+        title: Optional[str] = None,
+        lines: Optional[List[str]] = None,
+        footer: Optional[str] = None,
+        actions: Optional[List[discord.ui.Item]] = None,
+        accent_color: Optional[int] = None,
+        use_container: bool = False,
+    ):
         super().__init__(timeout=None)
+        _add_layout_text(
+            self,
+            title,
+            lines,
+            footer,
+            accent_color=accent_color,
+            use_container=use_container,
+        )
+        if actions:
+            row = discord.ui.ActionRow()
+            for item in actions:
+                row.add_item(item)
+            self.add_item(row)
+
+
+class ApproveLayoutView(BotGateLayoutView):
+    def __init__(
+        self,
+        cog: "BotGate",
+        guild_id: int,
+        bot_id: int,
+        *,
+        title: Optional[str] = None,
+        lines: Optional[List[str]] = None,
+        footer: Optional[str] = None,
+        accent_color: Optional[int] = None,
+    ):
         self.cog = cog
         self.guild_id = guild_id
         self.bot_id = bot_id
-        self.add_item(ApproveButton(cog, guild_id, bot_id))
+        self.tracks_approval = True
+        actions = [
+            ApproveButton(cog, guild_id, bot_id),
+            InviteLinkButton(bot_id, cog._oauth_url(bot_id)),
+        ]
+        super().__init__(
+            title=title,
+            lines=lines,
+            footer=footer,
+            actions=actions,
+            accent_color=accent_color,
+            use_container=True,
+        )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         await self.cog._log_console(f"[BotGate] View error: {error}")
@@ -88,19 +191,26 @@ class BotGate(commands.Cog):
             if not channel:
                 continue
             try:
-                embed = discord.Embed(
+                view = BotGateLayoutView(
                     title="⚠️ BotGate 경고",
-                    description="members intent가 꺼져 있어 봇 입장 감지가 동작하지 않을 수 있습니다.",
-                    color=discord.Color.orange(),
+                    lines=["members intent가 꺼져 있어 봇 입장 감지가 동작하지 않을 수 있습니다."],
+                    accent_color=int(discord.Color.orange()),
+                    use_container=True,
                 )
-                await channel.send(embed=embed)
+                await channel.send(view=view)
             except Exception:
                 continue
 
     async def _log_console(self, message: str):
         print(message)
 
-    async def _send_log(self, guild: discord.Guild, embed: discord.Embed, view: Optional[discord.ui.View] = None):
+    async def _send_log(
+        self,
+        guild: discord.Guild,
+        view: discord.ui.LayoutView,
+        *,
+        content: Optional[str] = None,
+    ):
         log_channel_id = await self.config.guild(guild).log_channel_id()
         if not log_channel_id:
             await self._log_console(f"[BotGate] log channel not set: {guild.id}")
@@ -110,14 +220,15 @@ class BotGate(commands.Cog):
             await self._log_console(f"[BotGate] log channel missing: {guild.id}")
             return
         try:
-            message = await channel.send(embed=embed, view=view)
-            if view:
-                try:
-                    self.bot.add_view(view, message_id=message.id)
-                except Exception:
-                    pass
-                if isinstance(view, ApproveView):
-                    await self._store_pending_approval(guild.id, view.bot_id, message.id)
+            message = await channel.send(content=content, view=view)
+            try:
+                self.bot.add_view(view, message_id=message.id)
+            except Exception:
+                pass
+            if getattr(view, "tracks_approval", False):
+                bot_id = getattr(view, "bot_id", None)
+                if bot_id is not None:
+                    await self._store_pending_approval(guild.id, bot_id, message.id)
         except Exception as exc:
             await self._log_console(f"[BotGate] failed to log: {exc}")
 
@@ -133,7 +244,7 @@ class BotGate(commands.Cog):
     def _oauth_url(self, bot_id: int) -> str:
         return (
             "https://discord.com/oauth2/authorize"
-            f"?client_id={bot_id}&permissions=0&integration_type=0&scope=bot"
+            f"?client_id={bot_id}&permissions=8&integration_type=0&scope=bot"
         )
 
     async def _approve_bot(self, guild: discord.Guild, bot_id: int, approved_by: int, source: str):
@@ -143,18 +254,19 @@ class BotGate(commands.Cog):
         await self.config.guild(guild).allowlist.set(allowlist)
 
         url = self._oauth_url(bot_id)
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="✅ 봇 승인 완료",
-            color=discord.Color.green(),
-            description=(
-                f"승인자: <@{approved_by}>\n"
-                f"봇 ID: `{bot_id}`\n"
-                f"승인 시각: <t:{int(discord.utils.utcnow().timestamp())}:F>"
-            ),
+            lines=[
+                f"승인자: <@{approved_by}>",
+                f"봇 ID: `{bot_id}`",
+                f"승인 시각: <t:{int(discord.utils.utcnow().timestamp())}:F>",
+            ],
+            footer=f"승인 경로: {source}",
+            actions=[InviteLinkButton(bot_id, url)],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
         )
-        embed.add_field(name="초대 링크", value=f"{url}")
-        embed.set_footer(text=f"승인 경로: {source}")
-        await self._send_log(guild, embed)
+        await self._send_log(guild, view)
         await self._remove_pending_approval(guild.id, bot_id)
 
         member = guild.get_member(bot_id)
@@ -187,6 +299,11 @@ class BotGate(commands.Cog):
             return
         role = member.guild.get_role(role_id)
         if not role:
+            return
+        bot_member = member.guild.me
+        if not bot_member or not bot_member.guild_permissions.manage_roles:
+            return
+        if role >= bot_member.top_role:
             return
         try:
             await member.add_roles(role, reason="BotGate 승인 봇 자동 역할 부여")
@@ -221,7 +338,7 @@ class BotGate(commands.Cog):
                 message_id = entry.get("message_id")
                 if not bot_id or not message_id:
                     continue
-                view = ApproveView(self, guild.id, bot_id)
+                view = ApproveLayoutView(self, guild.id, bot_id)
                 try:
                     self.bot.add_view(view, message_id=message_id)
                     cleaned.append(entry)
@@ -249,11 +366,13 @@ class BotGate(commands.Cog):
         if allowed:
             await self._assign_role_if_needed(member)
             if not self._cooldown_hit(member.guild.id, member.id):
-                embed = discord.Embed(
-                    description=f"✅ 승인된 봇 입장 확인: {member}(`{member.id}`)",
-                    color=discord.Color.green(),
+                view = BotGateLayoutView(
+                    title="✅ 승인된 봇 입장 확인",
+                    lines=[f"{member}(`{member.id}`)"],
+                    accent_color=int(discord.Color.green()),
+                    use_container=True,
                 )
-                await self._send_log(member.guild, embed)
+                await self._send_log(member.guild, view)
             return
 
         kick_result = "킥 성공"
@@ -267,28 +386,24 @@ class BotGate(commands.Cog):
         if self._cooldown_hit(member.guild.id, member.id):
             return
 
-        embed = discord.Embed(
-            title="🚨 승인되지 않은 봇 감지",
-            color=discord.Color.red(),
-        )
-        embed.add_field(name="봇", value=f"{member}(`{member.id}`)", inline=False)
-        embed.add_field(
-            name="서버",
-            value=f"{member.guild.name}(`{member.guild.id}`)",
-            inline=False,
-        )
-        embed.add_field(
-            name="감지 시각",
-            value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>",
-            inline=False,
-        )
-        embed.add_field(name="처리 결과", value=kick_result, inline=False)
+        lines = [
+            f"**봇:** {member}(`{member.id}`)",
+            f"**서버:** {member.guild.name}(`{member.guild.id}`)",
+            f"**감지 시각:** <t:{int(discord.utils.utcnow().timestamp())}:F>",
+            f"**처리 결과:** {kick_result}",
+        ]
         if kick_error:
-            embed.add_field(name="실패 사유", value=kick_error[:1000], inline=False)
-        embed.set_footer(text="수동 승인: [p]botgate allow <bot_id> | approver 추가: [p]botgate approver adduser @user")
-
-        view = ApproveView(self, member.guild.id, member.id)
-        await self._send_log(member.guild, embed, view=view)
+            lines.append(f"**실패 사유:** {kick_error[:1000]}")
+        view = ApproveLayoutView(
+            self,
+            member.guild.id,
+            member.id,
+            title="🚨 승인되지 않은 봇 감지",
+            lines=lines,
+            footer="수동 승인: [p]botgate allow <bot_id> | approver 추가: [p]botgate approver adduser @user",
+            accent_color=int(discord.Color.red()),
+        )
+        await self._send_log(member.guild, view)
 
     @commands.group(name="botgate")
     @commands.guild_only()
@@ -339,19 +454,6 @@ class BotGate(commands.Cog):
         role_id = await conf.approved_role_id()
         allowlist = await conf.allowlist()
 
-        embed = discord.Embed(title="BotGate 상태", color=discord.Color.blurple())
-        embed.add_field(name="활성화", value="ON" if enabled else "OFF", inline=True)
-        embed.add_field(
-            name="로그 채널",
-            value=f"<#{log_channel_id}>" if log_channel_id else "미설정",
-            inline=True,
-        )
-        embed.add_field(
-            name="승인 역할",
-            value=f"<@&{role_id}>" if role_id else "미설정",
-            inline=True,
-        )
-        embed.add_field(name="허용 목록 수", value=str(len(allowlist)), inline=True)
         owner_always = await conf.approver_owner_always()
         approver_user_ids = await conf.approver_user_ids()
         approver_role_ids = await conf.approver_role_ids()
@@ -361,16 +463,24 @@ class BotGate(commands.Cog):
             user_mentions += f" 외 {len(approver_user_ids) - 10}명"
         if len(approver_role_ids) > 10:
             role_mentions += f" 외 {len(approver_role_ids) - 10}개"
-        embed.add_field(
-            name="승인 버튼 권한자",
-            value=(
-                f"소유자 항상 허용: {'ON' if owner_always else 'OFF'}\n"
-                f"유저: {user_mentions}\n"
-                f"역할: {role_mentions}"
-            ),
-            inline=False,
+        view = BotGateLayoutView(
+            title="BotGate 상태",
+            lines=[
+                f"**활성화:** {'ON' if enabled else 'OFF'}",
+                f"**로그 채널:** <#{log_channel_id}>" if log_channel_id else "**로그 채널:** 미설정",
+                f"**승인 역할:** <@&{role_id}>" if role_id else "**승인 역할:** 미설정",
+                f"**허용 목록 수:** {len(allowlist)}",
+                (
+                    "**승인 버튼 권한자**\n"
+                    f"소유자 항상 허용: {'ON' if owner_always else 'OFF'}\n"
+                    f"유저: {user_mentions}\n"
+                    f"역할: {role_mentions}"
+                ),
+            ],
+            accent_color=int(discord.Color.blurple()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
 
     @botgate.command(name="allow")
     async def botgate_allow(self, ctx: commands.Context, bot_id: int):
@@ -406,12 +516,13 @@ class BotGate(commands.Cog):
     async def _owner_only_or_reply(self, ctx: commands.Context) -> bool:
         if await self._ensure_owner_only(ctx):
             return True
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="권한 부족",
-            description="이 명령어는 서버 소유자만 사용할 수 있습니다.",
-            color=discord.Color.red(),
+            lines=["이 명령어는 서버 소유자만 사용할 수 있습니다."],
+            accent_color=int(discord.Color.red()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
         return False
 
     @botgate_approver.command(name="adduser")
@@ -422,21 +533,23 @@ class BotGate(commands.Cog):
         conf = self.config.guild(ctx.guild)
         user_ids = await conf.approver_user_ids()
         if user.id in user_ids:
-            embed = discord.Embed(
+            view = BotGateLayoutView(
                 title="이미 등록됨",
-                description=f"{user.mention}는 이미 승인 권한자입니다.",
-                color=discord.Color.orange(),
+                lines=[f"{user.mention}는 이미 승인 권한자입니다."],
+                accent_color=int(discord.Color.orange()),
+                use_container=True,
             )
-            await ctx.send(embed=embed)
+            await ctx.send(view=view)
             return
         user_ids.append(user.id)
         await conf.approver_user_ids.set(user_ids)
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="승인 권한자 추가",
-            description=f"{user.mention}를 승인 권한자로 추가했습니다.",
-            color=discord.Color.green(),
+            lines=[f"{user.mention}를 승인 권한자로 추가했습니다."],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
 
     @botgate_approver.command(name="deluser")
     async def botgate_approver_deluser(self, ctx: commands.Context, user: discord.Member):
@@ -446,21 +559,23 @@ class BotGate(commands.Cog):
         conf = self.config.guild(ctx.guild)
         user_ids = await conf.approver_user_ids()
         if user.id not in user_ids:
-            embed = discord.Embed(
+            view = BotGateLayoutView(
                 title="미등록",
-                description=f"{user.mention}는 승인 권한자가 아닙니다.",
-                color=discord.Color.orange(),
+                lines=[f"{user.mention}는 승인 권한자가 아닙니다."],
+                accent_color=int(discord.Color.orange()),
+                use_container=True,
             )
-            await ctx.send(embed=embed)
+            await ctx.send(view=view)
             return
         user_ids.remove(user.id)
         await conf.approver_user_ids.set(user_ids)
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="승인 권한자 삭제",
-            description=f"{user.mention}를 승인 권한자에서 제거했습니다.",
-            color=discord.Color.green(),
+            lines=[f"{user.mention}를 승인 권한자에서 제거했습니다."],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
 
     @botgate_approver.command(name="addrole")
     async def botgate_approver_addrole(self, ctx: commands.Context, role: discord.Role):
@@ -470,21 +585,23 @@ class BotGate(commands.Cog):
         conf = self.config.guild(ctx.guild)
         role_ids = await conf.approver_role_ids()
         if role.id in role_ids:
-            embed = discord.Embed(
+            view = BotGateLayoutView(
                 title="이미 등록됨",
-                description=f"{role.mention}는 이미 승인 권한 역할입니다.",
-                color=discord.Color.orange(),
+                lines=[f"{role.mention}는 이미 승인 권한 역할입니다."],
+                accent_color=int(discord.Color.orange()),
+                use_container=True,
             )
-            await ctx.send(embed=embed)
+            await ctx.send(view=view)
             return
         role_ids.append(role.id)
         await conf.approver_role_ids.set(role_ids)
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="승인 권한 역할 추가",
-            description=f"{role.mention}을 승인 권한 역할로 추가했습니다.",
-            color=discord.Color.green(),
+            lines=[f"{role.mention}을 승인 권한 역할로 추가했습니다."],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
 
     @botgate_approver.command(name="delrole")
     async def botgate_approver_delrole(self, ctx: commands.Context, role: discord.Role):
@@ -494,21 +611,23 @@ class BotGate(commands.Cog):
         conf = self.config.guild(ctx.guild)
         role_ids = await conf.approver_role_ids()
         if role.id not in role_ids:
-            embed = discord.Embed(
+            view = BotGateLayoutView(
                 title="미등록",
-                description=f"{role.mention}는 승인 권한 역할이 아닙니다.",
-                color=discord.Color.orange(),
+                lines=[f"{role.mention}는 승인 권한 역할이 아닙니다."],
+                accent_color=int(discord.Color.orange()),
+                use_container=True,
             )
-            await ctx.send(embed=embed)
+            await ctx.send(view=view)
             return
         role_ids.remove(role.id)
         await conf.approver_role_ids.set(role_ids)
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="승인 권한 역할 삭제",
-            description=f"{role.mention}을 승인 권한 역할에서 제거했습니다.",
-            color=discord.Color.green(),
+            lines=[f"{role.mention}을 승인 권한 역할에서 제거했습니다."],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
 
     @botgate_approver.command(name="list")
     async def botgate_approver_list(self, ctx: commands.Context):
@@ -525,11 +644,17 @@ class BotGate(commands.Cog):
             user_mentions += f" 외 {len(user_ids) - 15}명"
         if len(role_ids) > 15:
             role_mentions += f" 외 {len(role_ids) - 15}개"
-        embed = discord.Embed(title="승인 버튼 권한자 목록", color=discord.Color.blurple())
-        embed.add_field(name="소유자 항상 허용", value="ON" if owner_always else "OFF", inline=False)
-        embed.add_field(name="유저", value=user_mentions, inline=False)
-        embed.add_field(name="역할", value=role_mentions, inline=False)
-        await ctx.send(embed=embed)
+        view = BotGateLayoutView(
+            title="승인 버튼 권한자 목록",
+            lines=[
+                f"**소유자 항상 허용:** {'ON' if owner_always else 'OFF'}",
+                f"**유저:** {user_mentions}",
+                f"**역할:** {role_mentions}",
+            ],
+            accent_color=int(discord.Color.blurple()),
+            use_container=True,
+        )
+        await ctx.send(view=view)
 
     @botgate_approver.command(name="reset")
     async def botgate_approver_reset(self, ctx: commands.Context):
@@ -540,12 +665,13 @@ class BotGate(commands.Cog):
         await conf.approver_user_ids.set([])
         await conf.approver_role_ids.set([])
         await conf.approver_owner_always.set(True)
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="초기화 완료",
-            description="승인 권한자를 모두 초기화했습니다. (소유자 항상 허용: ON)",
-            color=discord.Color.green(),
+            lines=["승인 권한자를 모두 초기화했습니다. (소유자 항상 허용: ON)"],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
 
     @botgate_approver.command(name="owneralways")
     async def botgate_approver_owneralways(self, ctx: commands.Context, value: bool):
@@ -553,9 +679,10 @@ class BotGate(commands.Cog):
         if not await self._owner_only_or_reply(ctx):
             return
         await self.config.guild(ctx.guild).approver_owner_always.set(value)
-        embed = discord.Embed(
+        view = BotGateLayoutView(
             title="설정 변경",
-            description=f"소유자 항상 허용: {'ON' if value else 'OFF'}",
-            color=discord.Color.green(),
+            lines=[f"소유자 항상 허용: {'ON' if value else 'OFF'}"],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(view=view)
