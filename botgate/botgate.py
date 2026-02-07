@@ -236,6 +236,33 @@ class BotGate(commands.Cog):
         except Exception as exc:
             await self._log_console(f"[BotGate] failed to log: {exc}")
 
+    async def _send_command_view(
+        self,
+        ctx: commands.Context,
+        view: discord.ui.LayoutView,
+        *,
+        skip_if_log_channel: bool = False,
+    ) -> None:
+        if skip_if_log_channel and ctx.guild:
+            log_channel_id = await self.config.guild(ctx.guild).log_channel_id()
+            if log_channel_id and ctx.channel and log_channel_id == ctx.channel.id:
+                return
+        await ctx.send(view=view)
+
+    async def _send_help_view(
+        self,
+        ctx: commands.Context,
+        title: str,
+        lines: List[str],
+    ) -> None:
+        view = BotGateLayoutView(
+            title=title,
+            lines=lines,
+            accent_color=int(discord.Color.blurple()),
+            use_container=True,
+        )
+        await ctx.send(view=view)
+
     def _cooldown_hit(self, guild_id: int, bot_id: int) -> bool:
         now = discord.utils.utcnow()
         key = (guild_id, bot_id)
@@ -404,7 +431,7 @@ class BotGate(commands.Cog):
             member.id,
             title="🚨 승인되지 않은 봇 감지",
             lines=lines,
-            footer="수동 승인: [p]botgate allow <bot_id> | approver 추가: [p]botgate approver adduser @user",
+            footer="수동 승인: [p]botgate allow <bot_id> | approver 추가: [p]botgate approver adduser",
             accent_color=int(discord.Color.red()),
         )
         await self._send_log(member.guild, view)
@@ -415,7 +442,20 @@ class BotGate(commands.Cog):
     async def botgate(self, ctx: commands.Context):
         """BotGate 설정"""
         if ctx.invoked_subcommand is None:
-            await ctx.send_help()
+            await self._send_help_view(
+                ctx,
+                "BotGate 명령어",
+                [
+                    "`!botgate toggle` - 기능 ON/OFF",
+                    "`!botgate channel <채널>` - 로그 채널 설정",
+                    "`!botgate setrole <역할|none>` - 승인 봇 자동 역할",
+                    "`!botgate status` - 현재 설정 요약",
+                    "`!botgate allow <bot_id>` - 봇 수동 허용",
+                    "`!botgate deny <bot_id>` - 봇 수동 차단",
+                    "`!botgate approver ...` - 승인 권한자 관리",
+                ],
+            )
+            return
 
     @botgate.command(name="toggle")
     async def botgate_toggle(self, ctx: commands.Context):
@@ -423,31 +463,61 @@ class BotGate(commands.Cog):
         current = await self.config.guild(ctx.guild).enabled()
         new_value = not current
         await self.config.guild(ctx.guild).enabled.set(new_value)
-        await ctx.send(f"BotGate가 {'ON' if new_value else 'OFF'} 상태입니다.")
+        view = BotGateLayoutView(
+            title="BotGate 상태 변경",
+            lines=[f"BotGate가 {'ON' if new_value else 'OFF'} 상태입니다."],
+            accent_color=int(discord.Color.green() if new_value else discord.Color.orange()),
+            use_container=True,
+        )
+        await self._send_command_view(ctx, view)
 
     @botgate.command(name="channel")
     async def botgate_channel(self, ctx: commands.Context, channel: discord.TextChannel):
         """로그 채널 설정"""
         await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
-        await ctx.send(f"로그 채널을 {channel.mention}로 설정했습니다.")
+        view = BotGateLayoutView(
+            title="로그 채널 설정",
+            lines=[f"로그 채널을 {channel.mention}로 설정했습니다."],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
+        )
+        await self._send_command_view(ctx, view)
 
     @botgate.command(name="setrole")
     async def botgate_setrole(self, ctx: commands.Context, *, role_arg: Optional[str] = None):
         """승인된 봇에게 자동 부여할 역할 설정/해제"""
         if role_arg is None or role_arg.lower() == "none":
             await self.config.guild(ctx.guild).approved_role_id.set(None)
-            await ctx.send("자동 역할 부여를 해제했습니다.")
+            view = BotGateLayoutView(
+                title="자동 역할 해제",
+                lines=["자동 역할 부여를 해제했습니다."],
+                accent_color=int(discord.Color.orange()),
+                use_container=True,
+            )
+            await self._send_command_view(ctx, view)
             return
 
         converter = commands.RoleConverter()
         try:
             role = await converter.convert(ctx, role_arg)
         except commands.BadArgument:
-            await ctx.send("역할을 찾을 수 없습니다. 멘션 또는 역할 이름을 사용하세요.")
+            view = BotGateLayoutView(
+                title="역할 찾기 실패",
+                lines=["역할을 찾을 수 없습니다. 멘션 또는 역할 이름을 사용하세요."],
+                accent_color=int(discord.Color.red()),
+                use_container=True,
+            )
+            await self._send_command_view(ctx, view)
             return
 
         await self.config.guild(ctx.guild).approved_role_id.set(role.id)
-        await ctx.send(f"승인된 봇 자동 역할을 {role.mention}로 설정했습니다.")
+        view = BotGateLayoutView(
+            title="자동 역할 설정",
+            lines=[f"승인된 봇 자동 역할을 {role.mention}로 설정했습니다."],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
+        )
+        await self._send_command_view(ctx, view)
 
     @botgate.command(name="status")
     async def botgate_status(self, ctx: commands.Context):
@@ -490,7 +560,13 @@ class BotGate(commands.Cog):
     async def botgate_allow(self, ctx: commands.Context, bot_id: int):
         """봇 수동 허용"""
         await self._approve_bot(ctx.guild, bot_id, approved_by=ctx.author.id, source="command")
-        await ctx.send(f"`{bot_id}`를 허용 목록에 추가했습니다.")
+        view = BotGateLayoutView(
+            title="봇 허용 완료",
+            lines=[f"`{bot_id}`를 허용 목록에 추가했습니다."],
+            accent_color=int(discord.Color.green()),
+            use_container=True,
+        )
+        await self._send_command_view(ctx, view, skip_if_log_channel=True)
 
     @botgate.command(name="deny")
     async def botgate_deny(self, ctx: commands.Context, bot_id: int):
@@ -499,9 +575,21 @@ class BotGate(commands.Cog):
         if str(bot_id) in allowlist:
             allowlist.pop(str(bot_id), None)
             await self.config.guild(ctx.guild).allowlist.set(allowlist)
-            await ctx.send(f"`{bot_id}`를 허용 목록에서 제거했습니다.")
+            view = BotGateLayoutView(
+                title="봇 차단 완료",
+                lines=[f"`{bot_id}`를 허용 목록에서 제거했습니다."],
+                accent_color=int(discord.Color.orange()),
+                use_container=True,
+            )
+            await self._send_command_view(ctx, view)
             return
-        await ctx.send("해당 봇은 허용 목록에 없습니다.")
+        view = BotGateLayoutView(
+            title="허용 목록 없음",
+            lines=["해당 봇은 허용 목록에 없습니다."],
+            accent_color=int(discord.Color.red()),
+            use_container=True,
+        )
+        await self._send_command_view(ctx, view)
 
     async def _ensure_owner_only(self, ctx: commands.Context) -> bool:
         if not ctx.guild:
@@ -515,7 +603,20 @@ class BotGate(commands.Cog):
     async def botgate_approver(self, ctx: commands.Context):
         """승인 버튼 권한자 관리(서버 소유자 전용)"""
         if ctx.invoked_subcommand is None:
-            await ctx.send_help()
+            await self._send_help_view(
+                ctx,
+                "BotGate 승인 권한자 명령어",
+                [
+                    "`!botgate approver adduser @user` - 승인 권한 유저 추가",
+                    "`!botgate approver deluser @user` - 승인 권한 유저 삭제",
+                    "`!botgate approver addrole @role` - 승인 권한 역할 추가",
+                    "`!botgate approver delrole @role` - 승인 권한 역할 삭제",
+                    "`!botgate approver list` - 승인 권한자 목록",
+                    "`!botgate approver reset` - 승인 권한자 초기화",
+                    "`!botgate approver owneralways true|false` - 소유자 항상 허용",
+                ],
+            )
+            return
 
     async def _owner_only_or_reply(self, ctx: commands.Context) -> bool:
         if await self._ensure_owner_only(ctx):
