@@ -53,7 +53,7 @@ def _add_layout_text(
     *,
     accent_color: Optional[int] = None,
     use_container: bool = False,
-) -> None:
+) -> Optional[discord.ui.Container]:
     container: Optional[discord.ui.Container] = None
     if use_container:
         container = discord.ui.Container(
@@ -89,6 +89,7 @@ def _add_layout_text(
         else:
             view.add_item(separator)
             view.add_item(footer_display)
+    return container
 
 
 class BotGateLayoutView(discord.ui.LayoutView):
@@ -103,7 +104,7 @@ class BotGateLayoutView(discord.ui.LayoutView):
         use_container: bool = False,
     ):
         super().__init__(timeout=None)
-        _add_layout_text(
+        container = _add_layout_text(
             self,
             title,
             lines,
@@ -115,7 +116,10 @@ class BotGateLayoutView(discord.ui.LayoutView):
             row = discord.ui.ActionRow()
             for item in actions:
                 row.add_item(item)
-            self.add_item(row)
+            if container is not None:
+                container.add_item(row)
+            else:
+                self.add_item(row)
 
 
 class ApproveLayoutView(BotGateLayoutView):
